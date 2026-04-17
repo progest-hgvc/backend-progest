@@ -152,6 +152,7 @@ Route::match(['get', 'post'], '/movimentacao/listBySetor', [MovimentacaoControll
 // Rota legado para compatibilidade com front que ainda chama "listByUnidade"
 Route::match(['get', 'post'], '/movimentacao/listByUnidade', [MovimentacaoController::class, 'listBySetor']);
 Route::get('/movimentacao/{id}', [MovimentacaoController::class, 'show']);
+Route::get('/movimentacao/{id}/preview-lotes', [MovimentacaoController::class, 'previewLotes']);
 Route::post('/movimentacao/{id}/process', [MovimentacaoController::class, 'process']);
 Route::post('/movimentacao/{id}/delete', [MovimentacaoController::class, 'destroy']);
 Route::post('/movimentacoes/{id}/status', [MovimentacaoController::class, 'updateStatus']);

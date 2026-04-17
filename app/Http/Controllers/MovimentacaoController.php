@@ -6,6 +6,7 @@ use Illuminate\Http\Request;
 use App\Models\Movimentacao;
 use App\Models\ItemMovimentacao;
 use App\Models\Estoque;
+use App\Models\EstoqueLote;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\DB;
@@ -240,12 +241,21 @@ class MovimentacaoController extends Controller
                     }
 
                     $estoqueOrigem->quantidade_atual -= $qtdLiberar;
+                    $estoqueOrigem->status_disponibilidade = $estoqueOrigem->quantidade_atual > 0 ? 'D' : 'I';
                     $estoqueOrigem->save();
 
                     Log::info("Estoque origem atualizado", [
                         'estoque_id' => $estoqueOrigem->id,
                         'nova_quantidade' => $estoqueOrigem->quantidade_atual
                     ]);
+
+                    // 1b. DEDUZIR dos lotes da ORIGEM (FIFO: vencimento mais próximo primeiro)
+                    $this->transferirLotesFifo(
+                        $item->produto_id,
+                        $mov->setor_origem_id,
+                        $mov->setor_destino_id,
+                        $qtdLiberar
+                    );
 
                     // 2. INCREMENTAR o estoque de DESTINO
                     $estoqueDestino = Estoque::where('produto_id', $item->produto_id)
@@ -275,6 +285,7 @@ class MovimentacaoController extends Controller
                     } else {
                         // Incrementar estoque existente
                         $estoqueDestino->quantidade_atual += $qtdLiberar;
+                        $estoqueDestino->status_disponibilidade = 'D';
                         $estoqueDestino->save();
 
                         Log::info("Estoque destino atualizado", [
@@ -362,5 +373,117 @@ class MovimentacaoController extends Controller
         $mov->itens()->delete();
         $mov->delete();
         return response()->json(['status' => true]);
+    }
+
+    /**
+     * Pré-visualização dos lotes que serão consumidos (FIFO) ao aprovar a movimentação.
+     * Chame este endpoint ANTES de confirmar a aprovação para exibir ao usuário
+     * qual lote (o de vencimento mais próximo) será descontado de cada produto.
+     *
+     * GET /api/movimentacao/{id}/preview-lotes
+     */
+    public function previewLotes($id)
+    {
+        $mov = Movimentacao::with('itens.produto')->find($id);
+        if (!$mov) {
+            return response()->json(['status' => false, 'message' => 'Movimentação não encontrada'], 404);
+        }
+
+        $preview = [];
+
+        foreach ($mov->itens as $item) {
+            $qtdNecessaria = (float) $item->quantidade_solicitada;
+            $lotesUsados   = [];
+            $restante      = $qtdNecessaria;
+
+            $lotes = EstoqueLote::where('produto_id', $item->produto_id)
+                ->where('unidade_id', $mov->setor_origem_id)
+                ->where('quantidade_disponivel', '>', 0)
+                ->orderBy('data_vencimento', 'asc') // FIFO: mais antigo primeiro
+                ->get();
+
+            foreach ($lotes as $lote) {
+                if ($restante <= 0) break;
+
+                $qtdUsada = min((float) $lote->quantidade_disponivel, $restante);
+                $lotesUsados[] = [
+                    'lote'                  => $lote->lote,
+                    'data_vencimento'       => $lote->data_vencimento,
+                    'data_fabricacao'       => $lote->data_fabricacao,
+                    'quantidade_disponivel' => (float) $lote->quantidade_disponivel,
+                    'quantidade_a_usar'     => $qtdUsada,
+                ];
+                $restante -= $qtdUsada;
+            }
+
+            $preview[] = [
+                'produto_id'               => $item->produto_id,
+                'produto_nome'             => $item->produto?->nome ?? "ID {$item->produto_id}",
+                'quantidade_solicitada'    => $qtdNecessaria,
+                'quantidade_sem_cobertura' => max(0, $restante),
+                'lotes_a_consumir'         => $lotesUsados,
+            ];
+        }
+
+        return response()->json(['status' => true, 'data' => $preview]);
+    }
+
+    /**
+     * Transfere quantidades entre lotes seguindo FIFO (vencimento mais próximo primeiro).
+     * Deduz do setor de origem e incrementa no setor de destino (criando o registro se necessário).
+     */
+    private function transferirLotesFifo(int $produtoId, int $setorOrigemId, ?int $setorDestinoId, float $qtdLiberar): void
+    {
+        $restante = $qtdLiberar;
+
+        $lotes = EstoqueLote::where('produto_id', $produtoId)
+            ->where('unidade_id', $setorOrigemId)
+            ->where('quantidade_disponivel', '>', 0)
+            ->orderBy('data_vencimento', 'asc') // FIFO
+            ->lockForUpdate()
+            ->get();
+
+        foreach ($lotes as $lote) {
+            if ($restante <= 0) break;
+
+            $qtdDeducao = min((float) $lote->quantidade_disponivel, $restante);
+
+            // Deduzir da origem
+            $lote->quantidade_disponivel -= $qtdDeducao;
+            $lote->save();
+            $restante -= $qtdDeducao;
+
+            Log::info('EstoqueLote origem descontado', [
+                'lote'            => $lote->lote,
+                'data_vencimento' => $lote->data_vencimento,
+                'qtd_deduzida'    => $qtdDeducao,
+                'qtd_restante'    => $lote->quantidade_disponivel,
+            ]);
+
+            // Incrementar no destino (apenas transferências com destino definido)
+            if ($setorDestinoId) {
+                $loteDestino = EstoqueLote::firstOrCreate(
+                    [
+                        'unidade_id' => $setorDestinoId,
+                        'produto_id' => $produtoId,
+                        'lote'       => $lote->lote,
+                    ],
+                    [
+                        'data_vencimento'       => $lote->data_vencimento,
+                        'data_fabricacao'       => $lote->data_fabricacao,
+                        'quantidade_disponivel' => 0,
+                    ]
+                );
+                $loteDestino->quantidade_disponivel += $qtdDeducao;
+                $loteDestino->save();
+
+                Log::info('EstoqueLote destino incrementado', [
+                    'lote'            => $lote->lote,
+                    'data_vencimento' => $lote->data_vencimento,
+                    'qtd_adicionada'  => $qtdDeducao,
+                    'qtd_total'       => $loteDestino->quantidade_disponivel,
+                ]);
+            }
+        }
     }
 }

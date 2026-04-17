@@ -19,42 +19,67 @@ class ProdutoController
         try {
             $query = Produto::with(['grupoProduto', 'unidadeMedida']);
 
+            // Ignorar produtos sem nome (registros incompletos/importados sem dados)
+            $query->whereNotNull('produtos.nome')->where('produtos.nome', '!=', '');
+
             // Busca textual por nome, marca ou grupo
             $search = $request->input('search');
             if (!empty($search)) {
                 $query->where(function ($q) use ($search) {
-                    $q->where('nome', 'LIKE', '%' . $search . '%')
-                      ->orWhere('marca', 'LIKE', '%' . $search . '%')
+                    $q->where('produtos.nome', 'LIKE', '%' . $search . '%')
+                      ->orWhere('produtos.marca', 'LIKE', '%' . $search . '%')
                       ->orWhereHas('grupoProduto', function ($gq) use ($search) {
                           $gq->where('nome', 'LIKE', '%' . $search . '%');
                       });
                 });
             }
 
-            // Filtro por grupo_produto_id
+            // Filtro por grupo_produto_id (direto)
             $grupoProdutoId = $request->input('grupo_produto_id');
             if (!empty($grupoProdutoId)) {
                 $query->where('grupo_produto_id', $grupoProdutoId);
             }
 
-            // Filtro por marca
+            // Filtro por marca (direto)
             $marca = $request->input('marca');
             if (!empty($marca)) {
-                $query->where('marca', $marca);
+                $query->where('produtos.marca', $marca);
             }
 
-            // Filtros legados (compatibilidade)
+            // Filtros via objeto ou array (suporta ambos os formatos do frontend)
             $filters = $request->input('filters', []);
-            foreach ($filters as $condition) {
-                if (is_array($condition)) {
-                    foreach ($condition as $column => $value) {
-                        if ($value !== null && $value !== '') {
-                            $allowedColumns = ['nome', 'marca', 'grupo_produto_id', 'unidade_medida_id', 'status'];
-                            if (in_array($column, $allowedColumns)) {
-                                if (in_array($column, ['grupo_produto_id', 'unidade_medida_id', 'status'])) {
-                                    $query->where($column, $value);
-                                } else {
-                                    $query->where($column, 'LIKE', '%' . $value . '%');
+            if (!empty($filters) && is_array($filters)) {
+                // Formato objeto: {"tipo_produto": "Medicamento", "status": "A"}
+                if (array_keys($filters) !== range(0, count($filters) - 1)) {
+                    // Filtro por tipo do grupo_produto (ex: Medicamento / Material)
+                    if (!empty($filters['tipo_produto'])) {
+                        $query->whereHas('grupoProduto', function ($gq) use ($filters) {
+                            $gq->where('tipo', $filters['tipo_produto']);
+                        });
+                    }
+                    if (!empty($filters['status'])) {
+                        $query->where('produtos.status', $filters['status']);
+                    }
+                    if (!empty($filters['grupo_produto_id'])) {
+                        $query->where('grupo_produto_id', $filters['grupo_produto_id']);
+                    }
+                    if (!empty($filters['nome'])) {
+                        $query->where('produtos.nome', 'LIKE', '%' . $filters['nome'] . '%');
+                    }
+                } else {
+                    // Formato array legado: [{"status": "A"}, {"nome": "dipirona"}]
+                    foreach ($filters as $condition) {
+                        if (is_array($condition)) {
+                            foreach ($condition as $column => $value) {
+                                if ($value !== null && $value !== '') {
+                                    $allowedColumns = ['nome', 'marca', 'grupo_produto_id', 'unidade_medida_id', 'status'];
+                                    if (in_array($column, $allowedColumns)) {
+                                        if (in_array($column, ['grupo_produto_id', 'unidade_medida_id', 'status'])) {
+                                            $query->where($column, $value);
+                                        } else {
+                                            $query->where('produtos.' . $column, 'LIKE', '%' . $value . '%');
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -63,30 +88,48 @@ class ProdutoController
             }
 
             // Ordenação dinâmica
-            $sortBy = $request->input('sort_by', 'nome');
-            $sortDir = $request->input('sort_dir', 'asc');
-            
+            $sortBy  = $request->input('sort_by', 'nome');
+            $sortDir = strtolower($request->input('sort_dir', 'asc'));
+            if (!in_array($sortDir, ['asc', 'desc'])) $sortDir = 'asc';
+
             $allowedSortColumns = ['id', 'nome', 'marca', 'status'];
-            
-            if (in_array($sortBy, $allowedSortColumns) && in_array(strtolower($sortDir), ['asc', 'desc'])) {
+            if (in_array($sortBy, $allowedSortColumns)) {
                 $query->orderBy('produtos.' . $sortBy, $sortDir);
-            } elseif ($sortBy === 'grupo_produto' && in_array(strtolower($sortDir), ['asc', 'desc'])) {
-                // Ordenar pelo nome do grupo
+            } elseif ($sortBy === 'grupo_produto') {
                 $query->join('grupo_produto', 'produtos.grupo_produto_id', '=', 'grupo_produto.id')
                       ->orderBy('grupo_produto.nome', $sortDir);
-            } elseif ($sortBy === 'unidade_medida' && in_array(strtolower($sortDir), ['asc', 'desc'])) {
-                // Ordenar pelo nome/sigla da unidade
+            } elseif ($sortBy === 'unidade_medida') {
                 $query->join('unidade_medida', 'produtos.unidade_medida_id', '=', 'unidade_medida.id')
                       ->orderBy('unidade_medida.nome', $sortDir);
             } else {
                 $query->orderBy('produtos.nome', 'asc');
             }
 
-            $produtos = $query
-                ->select('produtos.id', 'produtos.nome', 'produtos.marca', 'produtos.codigo_simpras', 'produtos.codigo_barras', 'produtos.grupo_produto_id', 'produtos.unidade_medida_id', 'produtos.status')
-                ->get();
+            $query->select(
+                'produtos.id', 'produtos.nome', 'produtos.marca',
+                'produtos.codigo_simpras', 'produtos.codigo_barras',
+                'produtos.grupo_produto_id', 'produtos.unidade_medida_id', 'produtos.status'
+            );
 
-            return response()->json(['status' => true, 'data' => $produtos]);
+            // Paginação: per_page padrão 1000; se per_page=0 retorna tudo (sem paginação)
+            $perPage = (int) $request->input('per_page', 1000);
+            $page    = (int) $request->input('page', 1);
+
+            if ($perPage > 0) {
+                $paginator = $query->paginate($perPage, ['*'], 'page', $page);
+                return response()->json([
+                    'status' => true,
+                    'data'   => $paginator->items(),
+                    'meta'   => [
+                        'total'        => $paginator->total(),
+                        'per_page'     => $paginator->perPage(),
+                        'current_page' => $paginator->currentPage(),
+                        'last_page'    => $paginator->lastPage(),
+                    ],
+                ]);
+            }
+
+            return response()->json(['status' => true, 'data' => $query->get()]);
         } catch (\Throwable $e) {
             Log::error('Erro ao listar produtos: ' . $e->getMessage());
             return response()->json(['status' => false, 'message' => 'Erro interno do servidor'], 500);
