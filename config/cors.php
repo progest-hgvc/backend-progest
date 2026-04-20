@@ -9,11 +9,14 @@ return [
 
     // AQUI É O PULO DO GATO: Em vez de '*', definimos as origens exatas do Vue
     // Adicionei localhost e 127.0.0.1 nas portas comuns do Vite (5173) e Vue CLI (8080)
+    // Bem como o domínio do Traefik local para Docker
     'allowed_origins' => [
         'http://localhost:5173',
         'http://localhost:5174',
         'http://127.0.0.1:5173',
         'http://localhost:8080',
+        'https://app.localhost',
+        'http://app.localhost',
     ],
 
     'allowed_origins_patterns' => [],
