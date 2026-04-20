@@ -2,6 +2,9 @@ services:
     # --- MySQL Database ---
     mysql:
         image: mysql:8.0
+        command: --log-bin-trust-function-creators=1
+        ports:
+            - "3306:3306"
         environment:
             - MYSQL_DATABASE=progest
             - MYSQL_USER=progest
@@ -10,7 +13,7 @@ services:
         volumes:
             - mysql_data:/var/lib/mysql
         healthcheck:
-            test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+            test: [ "CMD", "mysqladmin", "ping", "-h", "localhost" ]
             interval: 10s
             timeout: 5s
             retries: 5
@@ -26,7 +29,7 @@ services:
             dockerfile: Dockerfile
         image: progest-api:latest
         env_file:
-            - ./.env.api
+            - ./.env.docker.production
         depends_on:
             mysql:
                 condition: service_healthy
@@ -36,18 +39,11 @@ services:
         restart: unless-stopped
         labels:
             - "traefik.enable=true"
-            # Configuração do DOMÍNIO DA API
-            - "traefik.http.routers.progest-api.rule=Host(`hgvcprogest-api.davidjunior.dev.br`)"
+            # Configuração do Roteamento Seguro Híbrido da API com o próprio App (Sem CORS)
+            - "traefik.http.routers.progest-api.rule=Host(`${APP_DOMAIN}`) && PathPrefix(`/api`)"
             - "traefik.http.routers.progest-api.entrypoints=websecure"
             - "traefik.http.routers.progest-api.tls=true"
             - "traefik.http.routers.progest-api.tls.certresolver=myresolver"
-            # Middleware CORS
-            - "traefik.http.routers.progest-api.middlewares=progest-cors"
-            - "traefik.http.middlewares.progest-cors.headers.accesscontrolallowmethods=GET,POST,PUT,PATCH,DELETE,OPTIONS"
-            - "traefik.http.middlewares.progest-cors.headers.accesscontrolallowheaders=*"
-            - "traefik.http.middlewares.progest-cors.headers.accesscontrolalloworiginlist=*"
-            - "traefik.http.middlewares.progest-cors.headers.accesscontrolmaxage=100"
-            - "traefik.http.middlewares.progest-cors.headers.addvaryheader=true"
             # Porta interna onde a API roda (80)
             - "traefik.http.services.progest-api.loadbalancer.server.port=80"
 
@@ -55,7 +51,7 @@ services:
 volumes:
     mysql_data:
 
-# --- Networks ---
+        # --- Networks ---
 networks:
     progest-network: {}
     traefik-public:

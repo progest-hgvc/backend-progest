@@ -3,8 +3,12 @@
 /public/storage
 /storage/*.key
 /vendor
+
 .env
-.env.backup
+.env.*
+!.env.example
+!.env.docker.example
+
 .phpunit.result.cache
 docker-compose.override.yml
 Homestead.json
@@ -13,5 +17,5 @@ npm-debug.log
 yarn-error.log
 /.idea
 /.vscode
-Lista de Pendencias.md
+
 .agente

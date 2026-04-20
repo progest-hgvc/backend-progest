@@ -1,0 +1,60 @@
+services:
+  # --- MySQL Database ---
+  mysql:
+    image: mysql:8.0
+    command: --log-bin-trust-function-creators=1
+    ports:
+      - "3306:3306"
+    environment:
+      - MYSQL_DATABASE=progest
+      - MYSQL_USER=progest
+      - MYSQL_PASSWORD=progest_secret
+      - MYSQL_ROOT_PASSWORD=root_secret
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: [ "CMD", "mysqladmin", "ping", "-h", "localhost" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - progest-network
+    restart: unless-stopped
+
+  # --- Backend Laravel API ---
+  progest-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: progest-api:latest
+    env_file:
+      - ./.env.docker.local
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - progest-network
+      - traefik-public
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      # Rota 1: Mantém o domínio antigo (pode ser passado um API_DOMAIN, cai por fallback em api.localhost)
+      - "traefik.http.routers.progest-api.rule=Host(`${API_DOMAIN:-api.localhost}`)"
+      - "traefik.http.routers.progest-api.entrypoints=web"
+      # Rota 2: Mesma URL do frontend para evitar problemas de CORS e SSL warning de Ajax
+      - "traefik.http.routers.progest-api-path.rule=Host(`${APP_DOMAIN:-app.localhost}`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.progest-api-path.entrypoints=web"
+      # Porta interna onde a API roda (80)
+      - "traefik.http.services.progest-api.loadbalancer.server.port=80"
+
+# --- Volumes ---
+volumes:
+  mysql_data:
+
+    # --- Networks ---
+networks:
+  progest-network: {}
+  traefik-public:
+    external: true
+    name: traefik-public
